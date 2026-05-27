@@ -381,11 +381,26 @@ kubectl get deployment store-front -n pets -o jsonpath='{.spec.template.spec.con
 echo
 ```
 
-## 10-5. GitOps 워크플로우 체험 — 이미지 태그 변경
+## 10-5. GitOps 워크플로우 체험 — replicas 변경
 
-Git에서 매니페스트를 수정하면 Flux가 자동으로 클러스터에 반영합니다.
+Git에서 매니페스트를 수정하면 Flux가 자동으로 클러스터에 반영합니다. 이 실습에서는 `store-front` 의 `replicas` 값을 변경하고 자동 sync 과정을 관찰합니다.
 
-### Step 1: 매니페스트에서 replica 수 변경
+> [!WARNING]
+> **07절에서 만든 HPA(`store-front-hpa`, min=2/max=10)와 충돌 주의.**  
+> `store-front` Deployment의 `replicas` 필드를 Git에서 바꿔도, HPA가 CPU 사용률 기반으로 즉시 다시 자기가 원하는 값으로 덮어씁니다. virtual-customer가 부하를 생성 중이라면 replicas를 줄여도 HPA가 다시 늘립니다.
+>
+> **이 실습 직전에 HPA를 잠시 비활성화하세요:**
+> ```bash
+> kubectl delete hpa store-front-hpa -n pets
+> ```
+> 실습 종료 후 복원:
+> ```bash
+> kubectl apply -f workshop-manifests/55-hpa-store.yaml
+> ```
+>
+> 프로덕션 베스트 프랙티스로는 HPA가 관리하는 Deployment의 `replicas` 필드는 GitOps에서 제외(또는 ignore patch)하는 게 일반적입니다.
+
+### Step 1: 매니페스트에서 replicas 수 변경
 
 ```bash
 # replicas를 2 → 4로 변경
@@ -409,21 +424,30 @@ kubectl get pods -n pets -l app=store-front -w
 ```
 
 > [!NOTE]
-> ⏱ `sync_interval=30s`로 설정했으므로 최대 30초 내에 변경이 반영됩니다.
+> ⏱ `sync_interval=30s`로 설정했으므로 최대 30초 내에 변경이 반영됩니다. 즉시 보고 싶다면 [10-3 NOTE](#azure-portal에서-확인)에 있는 `kubectl annotate gitrepositories ...` 명령으로 강제 reconcile.
 
 ### 예상 결과
 
 ```
-NAME                           READY   STATUS    RESTARTS   AGE
-store-front-xxxxx-aaa          1/1     Running   0          10m
-store-front-xxxxx-bbb          1/1     Running   0          10m
-store-front-xxxxx-ccc          1/1     Running   0          15s    ← 새로 추가
-store-front-xxxxx-ddd          1/1     Running   0          15s    ← 새로 추가
+NAME                          READY   STATUS    RESTARTS   AGE
+store-front-88f94db58-rgnsv   1/1     Running   0          12m
+store-front-88f94db58-spbqd   1/1     Running   0          84s    ← 새로 추가
+store-front-88f94db58-vx6zr   1/1     Running   0          84s    ← 새로 추가
+store-front-88f94db58-z76q2   1/1     Running   0          12m
 ```
 
-> 📸 **스크린샷**: GitOps로 자동 반영된 Pod 수 변경
->
-> 📸 *스크린샷 준비 중 — `images/gitops-auto-sync.png`*
+### (선택) 역방향 — 4 → 2 로 줄이기
+
+```bash
+sed -i 's/replicas: 4/replicas: 2/' gitops-manifests/store-front-deployment.yaml
+git commit -am "scale: store-front replicas 4 → 2"
+git push origin main
+```
+
+30초 후 Pod이 4개 → 2개로 줄어듭니다. HPA를 다시 활성화하기 전까지는 이 값이 유지됩니다.
+
+> [!TIP]
+> **이미지 태그 변경(예: `:latest` → `:v2`) 데모를 보고 싶다면**, 매니페스트의 `image:` 필드를 sed로 바꾸고 동일한 add/commit/push 흐름을 따르면 됩니다. 그 경우 Pod이 rolling update로 한 번에 1~2개씩 교체되는 모습을 볼 수 있고, HPA와 충돌하지 않습니다.
 
 ## 10-6. 드리프트 감지 & 자동 복구
 
