@@ -33,7 +33,7 @@
 | [07](07-hpa-autoscaling.md) | HPA 오토스케일링 관찰 | 15분 | 🟢 필수 |
 | [08](08-nap-node-scaling.md) | NAP(Karpenter) 노드 자동 확장 | 15분 | 🟢 필수 |
 | [09](09-monitoring-troubleshooting.md) | 모니터링 & 트러블슈팅 실습 | 25분 | 🟡 권장 |
-| [10](10-gitops-flux.md) | GitOps — Flux v2 배포 자동화 | 25분 | 🟡 권장 |
+| [10](10-gitops-flux.md) | GitOps — Flux v2 배포 자동화 (+ Argo CD on AKS Preview 비교) | 25분 | 🟡 권장 |
 | [11](11-cleanup.md) | 정리 (리소스 삭제) | 5분 | 🟢 필수 |
 
 ### 권장 진행 경로

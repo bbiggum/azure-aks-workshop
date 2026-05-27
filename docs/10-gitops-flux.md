@@ -18,12 +18,24 @@ az aks get-credentials --name $CLUSTER_NAME --resource-group $RESOURCE_GROUP --o
 이 섹션에서는 AKS의 **매니지드 Flux v2** (Azure Arc 기반 GitOps 확장)를 활용하여
 Git 저장소의 매니페스트 변경이 자동으로 클러스터에 반영되는 과정을 체험합니다.
 
+> [!NOTE]
+> **AKS는 두 가지 매니지드 GitOps 옵션을 제공합니다.**  
+> 이 워크샵은 **GA 안정성 + 빠른 실습**을 위해 Flux v2를 선택했지만, 실무에선 둘 중 어느 쪽을 택할지 클러스터 수와 팀 구조에 따라 결정합니다.
+>
+> | 옵션 | 상태 | 주요 강점 |
+> |---|---|---|
+> | **Flux v2** (이 워크샵) | ✅ **GA** | 가볍고 안정적, Azure Policy 통합, 단일 클러스터에 최적 |
+> | **Argo CD** | 🟡 **Preview** (`Microsoft.ArgoCD` 확장) | 강력한 웹 UI, 멀티 클러스터 중앙 관리(Fleet Manager 조합) |
+>
+> 상세 비교와 Argo CD 설치 참고 명령은 [10-8. (참고) Argo CD on AKS](#10-8-참고-argo-cd-on-aks--preview-옵션과-비교)에서 다룹니다.
+
 ### 이 섹션에서 배우는 것
 
 - **GitOps 개념** — 명령형(imperative) vs 선언형(declarative) 배포의 차이
 - **Flux v2 확장** — AKS에서 기본 지원하는 GitOps 컨트롤러 설정
 - **자동 Sync** — Git 커밋 → 30초 내 클러스터 자동 반영
 - **드리프트 복구** — 수동 변경을 감지하고 Git 상태로 자동 되돌리기
+- **(참고) Flux v2 vs Argo CD** — 두 매니지드 옵션의 차이점과 선택 기준
 
 ### GitOps vs 전통적 배포 비교
 
@@ -484,6 +496,88 @@ az k8s-configuration flux delete \
 sed -i 's/replicas: 4/replicas: 2/' gitops-manifests/store-front-deployment.yaml
 kubectl apply -f workshop-manifests/aks-store-all-in-one-ko.yaml
 ```
+
+## 10-8. (참고) Argo CD on AKS — Preview 옵션과 비교
+
+이 워크샵은 **Flux v2**(AKS 매니지드 GA)를 사용했지만, GitOps의 또 다른 양대 산맥인 **Argo CD**도 AKS의 매니지드 확장으로 **Preview** 단계에 와 있습니다. 실무에서 두 도구가 어떻게 다른지 알아두면 도구 선택에 도움이 됩니다.
+
+### AKS 매니지드 형태 비교
+
+| 항목 | Flux v2 (이 워크샵에서 사용) | Argo CD |
+|---|---|---|
+| **AKS 매니지드 GA 상태** | ✅ **GA** | 🟡 **Preview** (`Microsoft.ContainerService/ArgoCDPreview` feature) |
+| **Azure 리소스 종류** | `Microsoft.KubernetesConfiguration/fluxConfigurations` | `Microsoft.KubernetesConfiguration/extensions` (type: `Microsoft.ArgoCD`) |
+| **설치 명령** | `az k8s-configuration flux create ...` | `az k8s-extension create --extension-type Microsoft.ArgoCD ...` |
+| **Portal 통합** | AKS → 좌측 메뉴 `GitOps` (전용 블레이드) | 클러스터에 Argo CD UI를 LoadBalancer/Ingress로 노출 |
+| **Azure Policy 통합** | ✅ 정책으로 GitOps 구성 강제 가능 | 🟡 Preview 단계 |
+| **Microsoft 공식 지원 (SR)** | ✅ | 🟡 Preview는 best-effort |
+| **워크샵 적합도** | ✅ 5~10분에 데모 완료 | UI/SSO 설정 시간 더 필요 |
+
+### 도구 자체 기능 비교 (매니지드 여부와 무관)
+
+| 항목 | Flux v2 | Argo CD |
+|---|---|---|
+| **UI** | ❌ 없음 (CLI/대시보드 별도 — `flux` CLI, Weave GitOps Dashboard) | ✅ **강력한 웹 UI** (시각적 Sync 트리, Diff, Rollback) |
+| **멀티 클러스터** | 클러스터마다 Flux 설치 | **중앙 Argo CD 1개로 여러 클러스터 관리** (Hub-Spoke) |
+| **앱 모델** | `Kustomization`, `HelmRelease` (선언적) | `Application` CRD (선언적 + UI에서 조작 가능) |
+| **이미지 자동 업데이트** | ✅ `ImageUpdateAutomation` 내장 | ❌ `ArgoCD Image Updater` 별도 |
+| **알림 통합** | `Notification Controller` (네이티브, Slack/Teams/PagerDuty 등) | `ArgoCD Notifications` |
+| **러닝 커브** | 낮음 (CRD 적음, 명령형 흐름) | 약간 높음 (Application, AppProject, RBAC 개념) |
+| **운영 부담** | 적음 (Controller 5개, 모두 stateless) | 보통 (server, repo-server, redis, dex 등 컴포넌트 다수) |
+| **CNCF 상태** | Graduated (2022) | Graduated (2022) |
+| **사용자 규모** | 더 적음 | 더 많음 (특히 대기업 DevOps팀에서 사실상 표준) |
+| **AKS Fleet Manager 통합** | 가능 | **특히 강점** — 수십~수백 AKS를 중앙 Argo CD로 관리 |
+
+### 언제 어느 쪽을 선택?
+
+**Flux v2가 유리한 경우**
+- AKS 매니지드 확장으로 GA 안정성을 원할 때
+- **단일 클러스터 + 단순한 GitOps 흐름**
+- 운영팀이 적고 추가 컴포넌트를 두기 부담스러울 때
+- 이미지 태그 자동 업데이트가 핵심 요구사항
+- Azure Policy로 GitOps 구성을 정책화하고 싶을 때
+
+**Argo CD가 유리한 경우**
+- **다수 클러스터를 중앙 1개에서 시각적으로 관리** 하고 싶을 때 (AKS Fleet Manager와 조합)
+- 개발자에게 **UI로 sync/diff/rollback 권한**을 주고 싶을 때
+- **App-of-Apps, ApplicationSet** 같은 고급 패턴이 필요할 때
+- 이미 ArgoCD가 사내 표준일 때 (생태계 도구가 더 많음)
+
+### Argo CD on AKS 설치 (참고용 — 실습 X)
+
+> [!IMPORTANT]
+> 아래 명령은 **참고용**입니다. Preview feature 등록 + AKS 확장 설치 + UI 노출 + SSO 연동 등 단계가 많아 워크샵에선 실행하지 않습니다.
+
+```bash
+# 1) Preview feature 등록 (구독당 1회)
+az feature register --namespace Microsoft.ContainerService --name ArgoCDPreview
+az provider register --namespace Microsoft.ContainerService
+
+# 2) AKS에 Argo CD 매니지드 확장 설치
+az k8s-extension create \
+  --resource-group $RESOURCE_GROUP \
+  --cluster-name $CLUSTER_NAME \
+  --cluster-type managedClusters \
+  --name argocd \
+  --extension-type Microsoft.ArgoCD \
+  --auto-upgrade true
+
+# 3) Argo CD 서버 Pod 확인 (argocd 네임스페이스)
+kubectl get pods -n argocd
+
+# 4) UI 접근 — Port-forward (실무에선 Ingress + AAD SSO 권장)
+kubectl port-forward svc/argocd-server -n argocd 8080:443
+
+# 5) 초기 admin 비밀번호
+kubectl get secret -n argocd argocd-initial-admin-secret \
+  -o jsonpath='{.data.password}' | base64 -d ; echo
+```
+
+> Argo CD 정식 도입 시에는 [공식 가이드](https://argo-cd.readthedocs.io/en/stable/operator-manual/declarative-setup/) 의 `Application`/`AppProject` CRD 작성 방식, RBAC, SSO 연동을 함께 학습하세요.
+
+### 한 줄 요약
+
+> **이 워크샵에서 Flux를 택한 건 "GA + 빠른 데모" 때문이고, ArgoCD가 더 나쁜 도구라서가 아닙니다. 실무에선 클러스터 수, UI 요구, 팀 구조에 따라 둘 다 정답이 될 수 있습니다.**
 
 ## 핵심 개념 정리
 
