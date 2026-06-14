@@ -30,7 +30,7 @@ spec:
         "kubernetes.io/os": linux
       containers:
         - name: ai-agent
-          image: aksworkshopkoea6e.azurecr.io/ai-agent:v1
+          image: aksworkshopkoea6e.azurecr.io/ai-agent:v2
           ports:
             - containerPort: 5100
           envFrom:
