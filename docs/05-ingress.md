@@ -470,7 +470,11 @@ kubectl create namespace alb-infra
 ```
 
 > [!IMPORTANT]
-> **이름 충돌 주의** — 이미 5-4(`approuting-istio`)를 진행했다면 `pets/pets-gateway` 가 이미 존재합니다. 같은 이름으로 AGC Gateway를 만들면 충돌하므로, 5-4를 먼저 [되돌리기](#-선택-되돌리기--app-routing-istio-정리) 하거나, Step 4 매니페스트의 `Gateway` / `HTTPRoute` 이름을 `pets-gateway-agc` / `pets-store-front-route-agc` 처럼 다른 이름으로 변경하세요.
+> **이 절에서 사용하는 이름 규칙** — 5-4(`approuting-istio`)와 병행하거나 워크숍에서 순서대로 시연해도 충돌이 없도록 AGC용 리소스는 **`-agc` 접미사**를 붙입니다.
+> - Gateway: `pets-gateway-agc`
+> - HTTPRoute: `pets-store-front-route-agc`
+>
+> 5-4의 Istio Gateway는 `pets-gateway` (접미사 없음) 이므로 동일 네임스페이스에 **둘 다 공존**할 수 있습니다. 워크숍 마친 후 하나만 사용하고 싶다면 [되돌리기](#선택-되돌리기--agc-정리)로 정리하세요.
 
 > [!NOTE]
 > Step 0에서 만든 전용 서브넷(`aks-appgateway`)이 있어야 합니다. 서브넷 요구사항(최소 `/24`, `Microsoft.ServiceNetworking/trafficControllers` 위임) 상세는 Step 0을 참고하세요.
@@ -534,7 +538,7 @@ spec:
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
-  name: pets-gateway
+  name: pets-gateway-agc          # ← 5-4(istio)의 pets-gateway와 이름 충돌 회피
   namespace: pets
   annotations:
     alb.networking.azure.io/alb-namespace: alb-infra
@@ -552,11 +556,11 @@ spec:
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: pets-store-front-route
+  name: pets-store-front-route-agc
   namespace: pets
 spec:
   parentRefs:
-    - name: pets-gateway
+    - name: pets-gateway-agc
       namespace: pets
   rules:
     - matches:
@@ -583,8 +587,8 @@ spec:
 
 > **매니페스트 구성 요약**:
 > - `ApplicationLoadBalancer` = AGC 리소스를 Azure에 프로비저닝 (ALB Controller가 관리)
-> - `Gateway` = 인프라 (리스너, 포트, 프로토콜)
-> - `HTTPRoute` = 라우팅 규칙 (경로 → 서비스 매핑, `/admin` → `/`로 URL 재작성)
+> - `Gateway` (`pets-gateway-agc`) = 인프라 (리스너, 포트, 프로토콜). 이름에 `-agc`를 붙여 5-4 Istio Gateway(`pets-gateway`)와 공존 가능
+> - `HTTPRoute` (`pets-store-front-route-agc`) = 라우팅 규칙 (경로 → 서비스 매핑, `/admin` → `/`로 URL 재작성)
 
 ### Step 5: NSG 규칙 추가
 
@@ -624,15 +628,16 @@ az network nsg rule create \
 > [!TIP]
 > 규칙 추가 직후 `curl http://<AGC-FQDN>/` 호출이 타임아웃(연결 자체가 안 됨)되다가 5~10초 뒤 200을 반환한다면 NSG 차단이 원인이었던 것입니다. 응답이 즉시 503/400이면 NSG가 아니라 백엔드 Pod/HTTPRoute 문제입니다.
 
-### Step 6: Gateway IP 확인 & 접속
+### Step 6: Gateway FQDN 확인 & 접속
 
 ```bash
 # Gateway 상태 확인 (Programmed=True 대기)
-kubectl get gateway pets-gateway -n pets -w
+kubectl get gateway pets-gateway-agc -n pets -w
 ```
 
 > [!NOTE]
-> ⏱ AGC 리소스가 Azure에서 프로비저닝되므로 **3~5분** 소요될 수 있습니다.
+> ⏱ AGC 리소스가 Azure에서 프로비저닝되므로 **3~5분** 소요될 수 있습니다. 정상 완료 시 `CLASS=azure-alb-external`, `ADDRESS=*.alb.azure.com` (IP가 아닌 **FQDN**), `PROGRAMMED=True`가 표시됩니다.
+>
 > 5분이 지나도 `PROGRAMMED`가 `Unknown`/`False`로 머물면 ALB Controller가 leader election 단계에서 멈춘 것일 수 있습니다. 다음 명령으로 Pod을 재시작하세요.
 >
 > ```bash
@@ -642,13 +647,25 @@ kubectl get gateway pets-gateway -n pets -w
 >
 > 자세한 증상/원인은 [트러블슈팅](#agc-gateway가-waiting-for-controller에서-멈춤-또는-applicationloadbalancer가-처리되지-않음) 참고.
 
+예상 출력:
+
 ```
-NAME           CLASS                ADDRESS                               PROGRAMMED   AGE
-pets-gateway   azure-alb-external   bjduafcpgef6b9h0.fz37.alb.azure.com   True         4m59s
+NAME               CLASS                ADDRESS                               PROGRAMMED   AGE
+pets-gateway-agc   azure-alb-external   akgshybghwh3evec.fz12.alb.azure.com   True         4m59s
 ```
 
+> [!TIP]
+> 혹시 5-4를 먼저 진행했고 `kubectl get gateway -n pets` 를 인자 없이 조회했다면 **두 개의 Gateway**가 보입니다.
+>
+> ```
+> pets-gateway       approuting-istio     20.196.247.19                         True
+> pets-gateway-agc   azure-alb-external   akgshybghwh3evec.fz12.alb.azure.com   True
+> ```
+>
+> AGC FQDN은 **반드시 `pets-gateway-agc`** 에서 조회해야 합니다. `pets-gateway`는 5-4의 Istio Gateway이며 IP 주소가 반환됩니다.
+
 ```bash
-AGC_FQDN=$(kubectl get gateway pets-gateway -n pets \
+AGC_FQDN=$(kubectl get gateway pets-gateway-agc -n pets \
   -o jsonpath='{.status.addresses[0].value}')
 echo "AGC 주소: http://$AGC_FQDN"
 ```
@@ -681,18 +698,24 @@ curl -s -o /dev/null -w '%{http_code}' http://$AGC_FQDN/admin
 ### (선택) 되돌리기 — AGC 정리
 
 ```bash
+# Gateway / HTTPRoute / ApplicationLoadBalancer / Namespace 모두 삭제
 kubectl delete -f workshop-manifests/61-agc-gateway.yaml
-kubectl delete ApplicationLoadBalancer pets-alb -n alb-infra
 kubectl delete namespace alb-infra
+
+# Service 타입 복원 (5-2/5-4를 동시에 쓰지 않는 경우에만)
 kubectl patch svc store-front -n pets -p '{"spec": {"type": "LoadBalancer"}}'
 kubectl patch svc store-admin -n pets -p '{"spec": {"type": "LoadBalancer"}}'
 ```
 
+> [!NOTE]
+> Azure 측 AGC 리소스(`Microsoft.ServiceNetworking/trafficControllers/...`)는 `ApplicationLoadBalancer` CR이 삭제되면 ALB Controller가 자동으로 제거합니다(finalizer 완료까지 1~2분 소요).
+
 ### AGC 점검 체크리스트
 
 - [ ] `kubectl get gatewayclass` — `azure-alb-external` 존재
-- [ ] `kubectl get gateway -n pets` — Programmed=True, ADDRESSES 할당
-- [ ] `kubectl get httproute -n pets` — Accepted=True
+- [ ] `kubectl get applicationloadbalancer -n alb-infra` — `DEPLOYMENT=True`
+- [ ] `kubectl get gateway pets-gateway-agc -n pets` — Programmed=True, **ADDRESS가 `*.alb.azure.com` FQDN**
+- [ ] `kubectl get httproute pets-store-front-route-agc -n pets` — Accepted=True / Programmed=True
 - [ ] `http://<AGC-FQDN>/` — 고객 스토어 표시
 - [ ] `http://<AGC-FQDN>/admin` — 관리자 대시보드 표시
 
@@ -1055,7 +1078,7 @@ kubectl get pods -A | grep alb-controller
 kubectl logs -n kube-system -l app=alb-controller --tail=30
 
 # Gateway 이벤트 확인
-kubectl describe gateway pets-gateway -n pets
+kubectl describe gateway pets-gateway-agc -n pets
 
 # ApplicationLoadBalancer 상태 확인
 kubectl get ApplicationLoadBalancer -n alb-infra -o yaml
@@ -1087,8 +1110,8 @@ kubectl delete pod -n kube-system -l app=alb-controller
 # 30초~1분 후 새 Pod이 leader를 잡고 ApplicationLoadBalancer / Gateway가 정상 처리됩니다.
 
 # 결과 확인
-kubectl get applicationloadbalancer -n alb-infra        # DEPLOYMENT=True
-kubectl get gateway -n pets pets-gateway -o wide        # PROGRAMMED=True, ADDRESS=...alb.azure.com
+kubectl get applicationloadbalancer -n alb-infra            # DEPLOYMENT=True
+kubectl get gateway -n pets pets-gateway-agc -o wide        # PROGRAMMED=True, ADDRESS=...alb.azure.com
 ```
 
 > [!NOTE]
