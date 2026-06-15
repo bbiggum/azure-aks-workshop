@@ -996,6 +996,44 @@ kubectl rollout status deploy/store-admin -n pets
 > [!NOTE]
 > 이 워크샵의 `store-admin` 컨테이너는 nginx에 `/admin/` alias location이 추가되어 있어, **04절 LoadBalancer 직접 접속(루트 `/`)과 05절 Ingress(`/admin`) 양쪽 모두 정상 동작**합니다. 자세한 원리는 `aks-store-demo-ko/src/store-admin/nginx.conf` 상단 주석 참고.
 
+### `az aks update` 실행 시 `ValueError: too many values to unpack (expected 3)`
+
+`az aks update --enable-application-load-balancer` 또는 `--enable-gateway-api` 등을 실행할 때 다음과 같은 traceback이 발생하는 경우입니다.
+
+```
+The behavior of this command has been altered by the following extension: aks-preview
+...
+ValueError: too many values to unpack (expected 3)
+```
+
+`aks-preview` 확장과 az core CLI의 ACNS(Advanced Container Networking) 시그니처 불일치로 발생합니다. 확장이 코어보다 너무 앞선 베타 버전이면 함수 반환값 개수가 어긋납니다.
+
+원인 확인:
+
+```bash
+az version -o table
+az extension list --query "[?name=='aks-preview'].{name:name,version:version}" -o table
+```
+
+해결 — 둘 중 한 가지를 선택합니다.
+
+**방법 A) az core 업그레이드 (권장, 로컬/VM 환경)**
+
+```bash
+az upgrade -y
+az version -o table   # azure-cli >= 2.86 이상 권장
+```
+
+**방법 B) aks-preview를 코어와 호환되는 버전으로 다운그레이드 (Cloud Shell 환경)**
+
+```bash
+az extension remove --name aks-preview
+az extension add --name aks-preview --version 18.0.0b9
+```
+
+> [!TIP]
+> `--enable-oidc-issuer --enable-workload-identity`만 사용한다면 `aks-preview` 확장 없이 az core만으로 실행할 수 있습니다. 임시로 확장을 제거(`az extension remove --name aks-preview`)한 뒤 해당 명령만 먼저 실행하고, 이후 확장을 재설치하여 `--enable-application-load-balancer`를 진행하는 방법도 가능합니다.
+
 ### AGC Gateway가 Programmed=False
 
 ALB Controller가 정상 동작하지 않거나 서브넷 연결이 잘못된 경우입니다.
