@@ -461,35 +461,16 @@ NAME                 CONTROLLER                                   ACCEPTED   AGE
 azure-alb-external   alb.networking.azure.io/alb-controller       True       2m
 ```
 
-### Step 2: ALB 인프라 네임스페이스 & 리소스 생성
+### Step 2: ALB 인프라 네임스페이스 생성
 
-AGC는 Azure에서 관리되는 ALB 리소스가 필요합니다.
+AGC 인프라 리소스를 모아 둘 네임스페이스만 먼저 만듭니다. 실제 `ApplicationLoadBalancer` CR은 Step 4 매니페스트에서 함께 생성합니다.
 
 ```bash
-# ALB 인프라 네임스페이스 생성
 kubectl create namespace alb-infra
-
-# AKS 클러스터의 관리 ID에 필요한 권한 부여
-MC_RG=$(az aks show -n $CLUSTER_NAME -g $RESOURCE_GROUP --query "nodeResourceGroup" -o tsv)
-MC_RG_ID=$(az group show -n $MC_RG --query "id" -o tsv)
-
-ALB_IDENTITY=$(az aks show -n $CLUSTER_NAME -g $RESOURCE_GROUP \
-  --query "ingressProfile.webAppRouting.identity.objectId" -o tsv 2>/dev/null || \
-  az aks show -n $CLUSTER_NAME -g $RESOURCE_GROUP \
-  --query "identity.principalId" -o tsv)
-
-# ApplicationLoadBalancer 리소스 생성
-kubectl apply -f - <<EOF
-apiVersion: alb.networking.azure.io/v1
-kind: ApplicationLoadBalancer
-metadata:
-  name: pets-alb
-  namespace: alb-infra
-spec:
-  associations:
-    - $MC_RG_ID/providers/Microsoft.Network/virtualNetworks/$(az network vnet list -g $MC_RG --query "[0].name" -o tsv)/subnets/$(az network vnet subnet list -g $MC_RG --vnet-name $(az network vnet list -g $MC_RG --query "[0].name" -o tsv) --query "[?contains(name,'alb')].name | [0]" -o tsv 2>/dev/null || echo "aks-subnet")
-EOF
 ```
+
+> [!IMPORTANT]
+> **이름 충돌 주의** — 이미 5-4(`approuting-istio`)를 진행했다면 `pets/pets-gateway` 가 이미 존재합니다. 같은 이름으로 AGC Gateway를 만들면 충돌하므로, 5-4를 먼저 [되돌리기](#-선택-되돌리기--app-routing-istio-정리) 하거나, Step 4 매니페스트의 `Gateway` / `HTTPRoute` 이름을 `pets-gateway-agc` / `pets-store-front-route-agc` 처럼 다른 이름으로 변경하세요.
 
 > [!NOTE]
 > Step 0에서 만든 전용 서브넷(`aks-appgateway`)이 있어야 합니다. 서브넷 요구사항(최소 `/24`, `Microsoft.ServiceNetworking/trafficControllers` 위임) 상세는 Step 0을 참고하세요.
@@ -523,10 +504,15 @@ kubectl apply -f workshop-manifests/61-agc-gateway.yaml
 
 > [!NOTE]
 > ⏱ `ApplicationLoadBalancer` 프로비저닝에 약 3~5분 소요됩니다.
-> `DEPLOYMENT`가 `True`로 바뀌는지 확인하세요.
+> `DEPLOYMENT`가 `True`로 바뀐 뒤 다음 Step으로 진행하세요.
 > ```bash
 > kubectl get applicationloadbalancer -n alb-infra -w
+> # 예상 출력:
+> # NAME       DEPLOYMENT   AGE
+> # pets-alb   True         3m12s
 > ```
+>
+> `DEPLOYMENT` 컬럼이 비어있거나 `False`로 오래 머문다면 ALB Controller Pod이 leader election 단계에서 멈춰 있을 수 있습니다. 이 경우 [트러블슈팅](#agc-gateway가-waiting-for-controller에서-멈춤-또는-applicationloadbalancer가-처리되지-않음) 참고.
 
 매니페스트 내용 (`workshop-manifests/61-agc-gateway.yaml`):
 
@@ -602,19 +588,31 @@ spec:
 
 ### Step 5: NSG 규칙 추가
 
-AGC가 외부 트래픽을 받으려면 AGC 서브넷의 NSG에 인바운드 규칙을 추가해야 합니다.
+AGC가 외부 트래픽을 받으려면 AGC 서브넷의 NSG에 인바운드 규칙을 추가해야 합니다. AKS가 AGC 서브넷에 NSG를 자동 생성(예: `aks-vnet-<id>-aks-appgateway-nsg-<region>`)했을 수 있지만, 기본 NSG에는 인터넷 인바운드 허용 규칙이 없으므로 명시적으로 추가합니다.
 
 ```bash
-# AGC 서브넷 NSG 이름 확인
-NSG_NAME=$(az network vnet subnet show -g $MC_RG --vnet-name $VNET_NAME -n aks-appgateway \
-  --query "networkSecurityGroup.id" -o tsv | xargs -I{} basename {})
+# AGC 서브넷 NSG ID/이름 확인
+NSG_ID=$(az network vnet subnet show -g $MC_RG --vnet-name $VNET_NAME -n aks-appgateway \
+  --query "networkSecurityGroup.id" -o tsv)
+echo "NSG_ID: $NSG_ID"
+
+# (드물게) 서브넷에 NSG가 연결되지 않은 경우 → 노드 서브넷의 NSG를 연결
+if [ -z "$NSG_ID" ]; then
+  NODE_NSG=$(az network vnet subnet list -g $MC_RG --vnet-name $VNET_NAME \
+    --query "[?name!='aks-appgateway'] | [0].networkSecurityGroup.id" -o tsv)
+  az network vnet subnet update -g $MC_RG --vnet-name $VNET_NAME -n aks-appgateway \
+    --network-security-group $NODE_NSG
+  NSG_ID=$NODE_NSG
+fi
+
+NSG_NAME=$(basename $NSG_ID)
 echo "NSG: $NSG_NAME"
 
 # HTTP/HTTPS 인바운드 허용
 az network nsg rule create \
   -g $MC_RG \
   --nsg-name $NSG_NAME \
-  -n AllowHTTPInbound \
+  -n AllowAGCInbound \
   --priority 100 \
   --source-address-prefixes Internet \
   --destination-port-ranges 80 443 \
@@ -622,6 +620,9 @@ az network nsg rule create \
   --protocol Tcp \
   --direction Inbound
 ```
+
+> [!TIP]
+> 규칙 추가 직후 `curl http://<AGC-FQDN>/` 호출이 타임아웃(연결 자체가 안 됨)되다가 5~10초 뒤 200을 반환한다면 NSG 차단이 원인이었던 것입니다. 응답이 즉시 503/400이면 NSG가 아니라 백엔드 Pod/HTTPRoute 문제입니다.
 
 ### Step 6: Gateway IP 확인 & 접속
 
@@ -632,6 +633,14 @@ kubectl get gateway pets-gateway -n pets -w
 
 > [!NOTE]
 > ⏱ AGC 리소스가 Azure에서 프로비저닝되므로 **3~5분** 소요될 수 있습니다.
+> 5분이 지나도 `PROGRAMMED`가 `Unknown`/`False`로 머물면 ALB Controller가 leader election 단계에서 멈춘 것일 수 있습니다. 다음 명령으로 Pod을 재시작하세요.
+>
+> ```bash
+> kubectl delete pod -n kube-system -l app=alb-controller
+> # 30초~1분 후 Gateway가 Programmed=True로 전환되고 ADDRESS에 FQDN이 할당됩니다.
+> ```
+>
+> 자세한 증상/원인은 [트러블슈팅](#agc-gateway가-waiting-for-controller에서-멈춤-또는-applicationloadbalancer가-처리되지-않음) 참고.
 
 ```
 NAME           CLASS                ADDRESS                               PROGRAMMED   AGE
@@ -1039,8 +1048,11 @@ az extension add --name aks-preview --version 18.0.0b9
 ALB Controller가 정상 동작하지 않거나 서브넷 연결이 잘못된 경우입니다.
 
 ```bash
+# ALB Controller Pod 위치 (AKS 애드온은 kube-system, Helm 설치는 azure-alb-system)
+kubectl get pods -A | grep alb-controller
+
 # ALB Controller 로그 확인
-kubectl logs -n azure-alb-system -l app=alb-controller --tail=30
+kubectl logs -n kube-system -l app=alb-controller --tail=30
 
 # Gateway 이벤트 확인
 kubectl describe gateway pets-gateway -n pets
@@ -1051,6 +1063,53 @@ kubectl get ApplicationLoadBalancer -n alb-infra -o yaml
 
 > AGC 전용 서브넷(최소 /24 CIDR)이 없으면 프로비저닝이 실패합니다.  
 > 5-3 Step 0(전용 서브넷 준비)을 다시 확인하거나 [공식 가이드](https://learn.microsoft.com/ko-kr/azure/application-gateway/for-containers/quickstart-deploy-application-gateway-for-containers-alb-controller)를 참고하세요.
+
+### AGC Gateway가 "Waiting for controller"에서 멈춤 또는 ApplicationLoadBalancer가 처리되지 않음
+
+`kubectl get gateway` 가 `PROGRAMMED=Unknown` / `Message: Waiting for controller` 상태로 5분 이상 머무는 경우입니다. 다음과 같이 진단합니다.
+
+```bash
+# 1) ApplicationLoadBalancer 상태 확인
+kubectl get applicationloadbalancer -n alb-infra
+# DEPLOYMENT 컬럼이 비어있으면 ALB Controller가 아직 처리 못 한 상태
+
+# 2) ALB Controller Pod별 로그 비교 (leader가 누구인지)
+for pod in $(kubectl get pods -n kube-system -l app=alb-controller -o name); do
+  echo "--- $pod ---"
+  kubectl logs -n kube-system $pod --tail=10
+done
+```
+
+로그 중 하나에서 `"Attempting to acquire leader lease..."` 만 보이고 더 이상 진행이 없으면 leader election이 멈춘 것입니다. **ALB Controller Pod을 강제 재시작**하세요.
+
+```bash
+kubectl delete pod -n kube-system -l app=alb-controller
+# 30초~1분 후 새 Pod이 leader를 잡고 ApplicationLoadBalancer / Gateway가 정상 처리됩니다.
+
+# 결과 확인
+kubectl get applicationloadbalancer -n alb-infra        # DEPLOYMENT=True
+kubectl get gateway -n pets pets-gateway -o wide        # PROGRAMMED=True, ADDRESS=...alb.azure.com
+```
+
+> [!NOTE]
+> 이 현상은 ALB Controller 애드온이 막 활성화된 직후, 또는 Pod이 다른 노드로 재스케줄된 직후 간헐적으로 발생합니다. 재발 시 동일한 방법으로 해결할 수 있습니다.
+
+### AGC FQDN 접속 시 연결 타임아웃 (NSG 차단)
+
+`curl http://<AGC-FQDN>/` 가 5~10초 후 connection timeout 으로 끊긴다면 NSG 인바운드가 막힌 것입니다. Step 5(NSG 규칙 추가)를 다시 실행하거나 다음과 같이 즉시 추가하세요.
+
+```bash
+MC_RG=$(az aks show -n $CLUSTER_NAME -g $RESOURCE_GROUP --query nodeResourceGroup -o tsv)
+VNET_NAME=$(az network vnet list -g $MC_RG --query "[0].name" -o tsv)
+NSG_NAME=$(az network vnet subnet show -g $MC_RG --vnet-name $VNET_NAME -n aks-appgateway \
+  --query "networkSecurityGroup.id" -o tsv | xargs -I{} basename {})
+
+az network nsg rule create -g $MC_RG --nsg-name $NSG_NAME -n AllowAGCInbound \
+  --priority 100 --source-address-prefixes Internet \
+  --destination-port-ranges 80 443 --access Allow --protocol Tcp --direction Inbound
+```
+
+> 응답이 즉시 503/400/404 라면 NSG가 아니라 백엔드 문제(Pod 없음 / HTTPRoute 매칭 실패 / Service selector mismatch)입니다. `kubectl get pods,svc,endpointslices -n pets` 로 확인하세요.
 
 ### approuting-istio Gateway가 Programmed=False 또는 EXTERNAL-IP가 `<pending>`
 
